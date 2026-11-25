@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.core.validators import MinValueValidator, RegexValidator
 from django.db import models
@@ -78,8 +78,12 @@ class Claim(models.Model):
     def total_paid(self):
         return self.payments.aggregate(total=Sum("amount"))["total"]
 
+#Primer fix: SI el monto es null por falta de pago o estado rechazado, se trata con con una exeption y se devuelve 0
     def pending_amount(self):
-        return self.amount_claimed - Decimal(str(self.total_paid()))
+        try:
+            return self.amount_claimed - Decimal(str(self.total_paid()))
+        except (TypeError, InvalidOperation):
+            return Decimal("0")
 
 
 class ClaimPayment(models.Model):
