@@ -4,10 +4,9 @@ from django.db.models import Count, Q, Sum, Value
 from django.db.models.functions import Coalesce, Concat
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
-
-from .forms import ClaimForm, PaymentForm
-from .models import Claim, Insurer, Policy
-
+# PARTE 2# importar formulario de anulacion y modelo ClaimPayment
+from .forms import ClaimForm, PaymentCancelForm, PaymentForm
+from .models import Claim, ClaimPayment, Insurer, Policy
 
 def dashboard(request):
     today = timezone.localdate()
@@ -31,7 +30,13 @@ def claim_list(request):
     claims = (
         Claim.objects
         .select_related("policy", "policy__client", "policy__insurer")
-        .annotate(paid_total=Coalesce(Sum("payments__amount"), Value(0.0)))
+        # PARTE 2# excluir pagos anulados en el calculo del listado
+        .annotate(
+            paid_total=Coalesce(
+                Sum("payments__amount", filter=Q(payments__cancelled_at__isnull=True)),
+                Value(0.0),
+            )
+        )
     )
 
     insurer_id = request.GET.get("insurer")
@@ -111,14 +116,29 @@ def register_payment(request, pk):
         payment.claim = claim
         payment.save()
 
-        if claim.status == Claim.Status.OPEN:
-            claim.status = Claim.Status.IN_REVIEW
-
-        if claim.total_paid() >= float(claim.amount_claimed):
-            claim.status = Claim.Status.SETTLED
-
-        claim.save()
+        # PARTE 2# centralizar actualizacion de estado en el modelo
+        claim.recalculate_status()
         messages.success(request, "Pago registrado.")
         return redirect("claims:detail", pk=claim.pk)
 
     return render(request, "claims/payment_form.html", {"form": form, "claim": claim})
+
+def cancel_payment(request, pk, payment_pk):
+    claim = get_object_or_404(Claim, pk=pk)
+    payment = get_object_or_404(ClaimPayment, pk=payment_pk, claim=claim)
+
+    if payment.is_cancelled:
+        messages.warning(request, "Este pago ya fue anulado.")
+        return redirect("claims:detail", pk=claim.pk)
+
+    form = PaymentCancelForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        payment.cancel(form.cleaned_data["reason"])
+        messages.success(request, "Pago anulado correctamente.")
+        return redirect("claims:detail", pk=claim.pk)
+
+    return render(
+        request,
+        "claims/payment_cancel_form.html",
+        {"form": form, "claim": claim, "payment": payment},
+    )

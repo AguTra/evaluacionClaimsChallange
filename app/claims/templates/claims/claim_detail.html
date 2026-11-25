@@ -16,12 +16,34 @@
 </div>
 <div class="card">
     <h3>Pagos</h3>
+    <!-- PARTE 2# mostrar estado del pago fecha y motivo de anulacion y boton para anular -->
     <table>
-        <tr><th>Fecha</th><th>Referencia</th><th class="num">Monto</th></tr>
+        <tr><th>Fecha</th><th>Referencia</th><th>Estado</th><th class="num">Monto</th><th>Acciones</th></tr>
         {% for payment in payments %}
-        <tr><td>{{ payment.paid_at|date:"d/m/Y" }}</td><td>{{ payment.reference }}</td><td class="num">{{ payment.amount|intcomma }}</td></tr>
+        <tr {% if payment.is_cancelled %}style="opacity: 0.6;"{% endif %}>
+            <td>{{ payment.paid_at|date:"d/m/Y" }}</td>
+            <td>{{ payment.reference }}</td>
+            <td>
+                {% if payment.is_cancelled %}
+                    <span class="badge badge-rejected">Anulado</span>
+                    <div class="muted" style="font-size: 0.85em;">
+                        {{ payment.cancelled_at|date:"d/m/Y H:i" }} — {{ payment.cancellation_reason }}
+                    </div>
+                {% else %}
+                    <span class="badge badge-settled">Activo</span>
+                {% endif %}
+            </td>
+            <td class="num">
+                {% if payment.is_cancelled %}<s>{{ payment.amount|intcomma }}</s>{% else %}{{ payment.amount|intcomma }}{% endif %}
+            </td>
+            <td>
+                {% if not payment.is_cancelled %}
+                    <a class="btn btn-secondary" href="{% url 'claims:payment_cancel' claim.pk payment.pk %}">Anular</a>
+                {% endif %}
+            </td>
+        </tr>
         {% empty %}
-        <tr><td colspan="3" class="muted">Sin pagos registrados.</td></tr>
+        <tr><td colspan="5" class="muted">Sin pagos registrados.</td></tr>
         {% endfor %}
     </table>
     <p><a class="btn" href="{% url 'claims:payment_create' claim.pk %}">Registrar pago</a></p>

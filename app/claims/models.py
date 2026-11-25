@@ -1,8 +1,10 @@
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from django.core.validators import MinValueValidator, RegexValidator
-from django.db import models
+# PARTE 2# imports para transacciones atomicas y fecha actual
+from django.db import models, transaction
 from django.db.models import Sum
+from django.utils import timezone
 
 only_digits = RegexValidator(r"^\d+$", "Only digits are allowed.")
 
@@ -68,7 +70,8 @@ class Claim(models.Model):
         max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))]
     )
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
-    #Tiket 3, acelerar el ordenamiento  y filtrado
+
+    # Tiket 3, acelerar el ordenamiento y filtrado
     class Meta:
         ordering = ["-reported_at", "-id"]
         indexes = [
@@ -80,11 +83,32 @@ class Claim(models.Model):
         return self.number
 
     def total_paid(self):
-        # Ticket 1: Si no hay pagos, aggregate devuelve None; devolvemos 0 para evitar errores  de negocio
-        return self.payments.aggregate(total=Sum("amount"))["total"] or 0
+        # Ticket 1: Si no hay pagos, aggregate devuelve None; devolvemos 0 para evitar errores de negocio
+        # PARTE 2# excluir pagos anulados del total pagado
+        return (
+            self.payments.filter(cancelled_at__isnull=True).aggregate(total=Sum("amount"))["total"]
+            or 0
+        )
 
     def pending_amount(self):
         return self.amount_claimed - Decimal(str(self.total_paid()))
+
+    # PARTE 2# recalcular estado del siniestro segun pagos activos
+    def recalculate_status(self):
+        if self.status == self.Status.REJECTED:
+            return
+
+        paid = Decimal(str(self.total_paid()))
+        if paid >= self.amount_claimed:
+            new_status = self.Status.SETTLED
+        elif paid > 0:
+            new_status = self.Status.IN_REVIEW
+        else:
+            new_status = self.Status.OPEN
+
+        if self.status != new_status:
+            self.status = new_status
+            self.save(update_fields=["status"])
 
 
 class ClaimPayment(models.Model):
@@ -92,9 +116,28 @@ class ClaimPayment(models.Model):
     paid_at = models.DateField()
     amount = models.FloatField()
     reference = models.CharField(max_length=60, blank=True)
+    # PARTE 2# campos para baja logica de pagos con fecha y motivo
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancellation_reason = models.CharField(max_length=255, blank=True)
 
     class Meta:
         ordering = ["paid_at", "id"]
 
     def __str__(self):
         return f"{self.claim.number} - {self.amount}"
+
+    # PARTE 2# propiedad para saber si el pago esta anulado
+    @property
+    def is_cancelled(self):
+        return self.cancelled_at is not None
+
+    # PARTE 2# anular pago de forma atomica y actualizar estado del siniestro
+    def cancel(self, reason):
+        if self.is_cancelled:
+            raise ValueError("El pago ya se encuentra anulado.")
+
+        with transaction.atomic():
+            self.cancelled_at = timezone.now()
+            self.cancellation_reason = reason
+            self.save(update_fields=["cancelled_at", "cancellation_reason"])
+            self.claim.recalculate_status()

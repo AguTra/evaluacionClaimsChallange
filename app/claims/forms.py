@@ -39,3 +39,17 @@ class PaymentForm(forms.ModelForm):
         if amount <= 0:
             raise forms.ValidationError("El monto debe ser positivo.")
         return amount
+
+# PARTE 2# formulario para pedir el motivo obligatorio de anulacion
+class PaymentCancelForm(forms.Form):
+    reason = forms.CharField(
+        label="Motivo de anulación",
+        max_length=255,
+        widget=forms.Textarea(attrs={"rows": 3, "placeholder": "Ej: monto equivocado, pago duplicado..."}),
+    )
+
+    def clean_reason(self):
+        reason = self.cleaned_data["reason"].strip()
+        if not reason:
+            raise forms.ValidationError("Debe indicar un motivo de anulación.")
+        return reason
