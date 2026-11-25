@@ -109,3 +109,91 @@ class Ticket3ClaimListPerformanceTest(BaseClaimTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["page_obj"].paginator.count, 30)
+
+# PARTE 2# tests para anulacion de pagos y coherencia de estados
+class Part2PaymentCancellationTest(BaseClaimTestCase):
+    def setUp(self):
+        super().setUp()
+        self.today = timezone.localdate()
+        self.claim = Claim.objects.create(
+            number="CLM-CANCEL-001",
+            policy=self.policy,
+            reported_at=self.today,
+            cause="Choque",
+            amount_claimed=Decimal("10000.00"),
+        )
+
+    def test_cancel_partial_payment_reverts_status_to_open(self):
+        # Pago parcial deja el siniestro en IN_REVIEW
+        payment = ClaimPayment.objects.create(
+            claim=self.claim, paid_at=self.today, amount=4000.0, reference="P-1"
+        )
+        self.claim.recalculate_status()
+        self.assertEqual(self.claim.status, Claim.Status.IN_REVIEW)
+
+        # Anular el unico pago vuelve el siniestro a OPEN y deja pagado en 0
+        url = reverse("claims:payment_cancel", args=[self.claim.pk, payment.pk])
+        response = self.client.post(url, {"reason": "Monto equivocado"})
+        self.assertRedirects(response, reverse("claims:detail", args=[self.claim.pk]))
+
+        payment.refresh_from_db()
+        self.claim.refresh_from_db()
+
+        self.assertTrue(payment.is_cancelled)
+        self.assertIsNotNone(payment.cancelled_at)
+        self.assertEqual(payment.cancellation_reason, "Monto equivocado")
+        self.assertEqual(self.claim.total_paid(), 0)
+        self.assertEqual(self.claim.pending_amount(), Decimal("10000.00"))
+        self.assertEqual(self.claim.status, Claim.Status.OPEN)
+
+    def test_cancel_one_of_two_payments_reverts_settled_to_in_review(self):
+        p1 = ClaimPayment.objects.create(
+            claim=self.claim, paid_at=self.today, amount=6000.0, reference="P-1"
+        )
+        p2 = ClaimPayment.objects.create(
+            claim=self.claim, paid_at=self.today, amount=4000.0, reference="P-2"
+        )
+        self.claim.recalculate_status()
+        self.assertEqual(self.claim.status, Claim.Status.SETTLED)
+
+        # Al anular p2, queda solo p1 (6000 < 10000), debe volver a IN_REVIEW
+        p2.cancel("Pago duplicado")
+        self.claim.refresh_from_db()
+
+        self.assertEqual(self.claim.total_paid(), 6000.0)
+        self.assertEqual(self.claim.pending_amount(), Decimal("4000.00"))
+        self.assertEqual(self.claim.status, Claim.Status.IN_REVIEW)
+
+    def test_cancelled_payment_is_excluded_from_claim_list(self):
+        p1 = ClaimPayment.objects.create(
+            claim=self.claim, paid_at=self.today, amount=3000.0, reference="P-1"
+        )
+        p2 = ClaimPayment.objects.create(
+            claim=self.claim, paid_at=self.today, amount=2000.0, reference="P-2"
+        )
+        p2.cancel("Error de carga")
+
+        response = self.client.get(reverse("claims:list"), {"q": "CLM-CANCEL-001"})
+        self.assertEqual(response.status_code, 200)
+        listed_claim = response.context["claims"][0]
+        self.assertEqual(listed_claim.paid_total, 3000.0)
+
+    def test_cancel_payment_requires_reason(self):
+        payment = ClaimPayment.objects.create(
+            claim=self.claim, paid_at=self.today, amount=1000.0, reference="P-1"
+        )
+        url = reverse("claims:payment_cancel", args=[self.claim.pk, payment.pk])
+        response = self.client.post(url, {"reason": "   "})
+
+        self.assertEqual(response.status_code, 200)
+        payment.refresh_from_db()
+        self.assertFalse(payment.is_cancelled)
+
+    def test_cannot_cancel_payment_twice(self):
+        payment = ClaimPayment.objects.create(
+            claim=self.claim, paid_at=self.today, amount=1000.0, reference="P-1"
+        )
+        payment.cancel("Primer motivo")
+
+        with self.assertRaises(ValueError):
+            payment.cancel("Segundo motivo")
