@@ -1,5 +1,7 @@
 from django.contrib import messages
-from django.db.models import Count
+from django.core.paginator import Paginator
+from django.db.models import Count, Q, Sum, Value
+from django.db.models.functions import Coalesce, Concat
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
@@ -13,39 +15,66 @@ def dashboard(request):
         "today": today,
         "open_claims": Claim.objects.filter(status=Claim.Status.OPEN).count(),
         "in_review_claims": Claim.objects.filter(status=Claim.Status.IN_REVIEW).count(),
-        #Fix ticket 2, ajustando filtrado para abarcar correctamente el mes
-        "reported_this_month": Claim.objects.filter(reported_at__year=today.year,reported_at__month=today.month).count(),
+        # Fix ticket 2, ajustando filtrado para abarcar correctamente el mes y año
+        "reported_this_month": Claim.objects.filter(
+            reported_at__year=today.year, reported_at__month=today.month
+        ).count(),
         "by_status": Claim.objects.values("status").annotate(total=Count("id")).order_by("status"),
     }
     return render(request, "claims/dashboard.html", context)
 
 
 def claim_list(request):
-    claims = Claim.objects.all()
+    # Ticket 3: Evita el problema N+1 en el template.
+    # select_related trae policy, client e insurer en un solo JOIN en vez de 3 queries por fila.
+    # annotate calcula el total pagado en SQL (evita llamar a claim.total_paid() por cada siniestro)
+    claims = (
+        Claim.objects
+        .select_related("policy", "policy__client", "policy__insurer")
+        .annotate(paid_total=Coalesce(Sum("payments__amount"), Value(0.0)))
+    )
 
     insurer_id = request.GET.get("insurer")
+    # tiket 3
+    # ejecuta 2 query separadas, trae toda la info en memoria
+    # Se cambia a un join para que la consulta filtre directamente sobre las polizas solicitadas
     if insurer_id:
-        policy_ids = list(
-            Policy.objects.filter(insurer_id=insurer_id).values_list("id", flat=True)
-        )
-        claims = claims.filter(policy_id__in=policy_ids)
+        claims = claims.filter(policy__insurer_id=insurer_id)
 
     status = request.GET.get("status")
     if status:
         claims = claims.filter(status=status)
 
     search = request.GET.get("q", "").strip()
+    # tiket 3
+    # Antes traia toda la tabla a memoria en Python y disparaba 2 queries extra por cada siniestro (policy y client)
+    # ahora concatena nombre y apellido directamente en SQL y filtra con Q (icontains) en una sola consulta.
     if search:
-        matching_ids = [
-            claim.id
-            for claim in Claim.objects.all()
-            if search.lower() in claim.policy.client.full_name.lower()
-            or search.lower() in claim.number.lower()
-        ]
-        claims = claims.filter(id__in=matching_ids)
+        claims = claims.annotate(
+            client_full_name=Concat(
+                "policy__client__first_name",
+                Value(" "),
+                "policy__client__last_name",
+            )
+        ).filter(
+            Q(number__icontains=search)
+            | Q(client_full_name__icontains=search)
+        )
+
+    # Ticket 3: Paginacion para evitar cargar y renderizar cientos de miles de registros de una sola vez (LIMIT/OFFSET en SQL).
+    claims = claims.order_by("-reported_at", "-id")
+    paginator = Paginator(claims, 25)
+    page_number = request.GET.get("page")
+    page_obj = paginator.get_page(page_number)
+
+    # Conserva los filtros activos en la URL al cambiar de página
+    query_params = request.GET.copy()
+    query_params.pop("page", None)
 
     context = {
-        "claims": claims,
+        "claims": page_obj,
+        "page_obj": page_obj,
+        "query_string": query_params.urlencode(),
         "insurers": Insurer.objects.all(),
         "statuses": Claim.Status.choices,
         "filters": {"insurer": insurer_id or "", "status": status or "", "q": search},

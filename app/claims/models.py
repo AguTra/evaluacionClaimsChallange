@@ -68,22 +68,23 @@ class Claim(models.Model):
         max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))]
     )
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
-
+    #Tiket 3, acelerar el ordenamiento  y filtrado
     class Meta:
         ordering = ["-reported_at", "-id"]
+        indexes = [
+            models.Index(fields=["-reported_at", "-id"], name="claim_reported_id_idx"),
+            models.Index(fields=["status", "-reported_at", "-id"], name="claim_status_rep_idx"),
+        ]
 
     def __str__(self):
         return self.number
 
     def total_paid(self):
-        return self.payments.aggregate(total=Sum("amount"))["total"]
+        # Ticket 1: Si no hay pagos, aggregate devuelve None; devolvemos 0 para evitar errores  de negocio
+        return self.payments.aggregate(total=Sum("amount"))["total"] or 0
 
-#Primer fix: SI el monto es null por falta de pago o estado rechazado, se trata con con una exeption y se devuelve 0
     def pending_amount(self):
-        try:
-            return self.amount_claimed - Decimal(str(self.total_paid()))
-        except (TypeError, InvalidOperation):
-            return Decimal("0")
+        return self.amount_claimed - Decimal(str(self.total_paid()))
 
 
 class ClaimPayment(models.Model):

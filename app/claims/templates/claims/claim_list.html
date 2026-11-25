@@ -34,17 +34,40 @@
         {% for claim in claims %}
         <tr>
             <td><a href="{% url 'claims:detail' claim.pk %}">{{ claim.number }}</a></td>
+            <!-- Tiket 3 
+            Se ejecuta una query por cada cosa renderizada, si fueran 100 filas equivalen a 300.
+            Solucionado desde views.py con select_related("policy", "policy__client", "policy__insurer"). -->
             <td>{{ claim.reported_at|date:"d/m/Y" }}</td>
             <td>{{ claim.policy.client.full_name }}</td>
             <td>{{ claim.policy.number }}</td>
             <td>{{ claim.policy.insurer.name }}</td>
             <td><span class="badge badge-{{ claim.status }}">{{ claim.get_status_display }}</span></td>
             <td class="num">{{ claim.amount_claimed|intcomma }}</td>
-            <td class="num">{{ claim.total_paid|default:0|intcomma }}</td>
+            <!-- Ticket 3: Se reemplaza claim.total_paid (que disparaba 1 query SUM por fila)
+            por el campo anotado paid_total calculado en la consulta principal. -->
+            <td class="num">{{ claim.paid_total|default:0|intcomma }}</td>
         </tr>
         {% empty %}
         <tr><td colspan="8" class="muted">No hay siniestros con esos filtros.</td></tr>
         {% endfor %}
     </table>
+
+    <!-- Ticket 3: Controles de paginacion preservando los filtros activos (query_string) -->
+    {% if page_obj.paginator.num_pages > 1 %}
+    <div style="margin-top: 1rem; display: flex; justify-content: space-between; align-items: center;">
+        <span class="muted">
+            Página {{ page_obj.number }} de {{ page_obj.paginator.num_pages }}
+            ({{ page_obj.paginator.count }} siniestros)
+        </span>
+        <div>
+            {% if page_obj.has_previous %}
+                <a class="btn btn-secondary" href="?{% if query_string %}{{ query_string }}&{% endif %}page={{ page_obj.previous_page_number }}">Anterior</a>
+            {% endif %}
+            {% if page_obj.has_next %}
+                <a class="btn btn-secondary" href="?{% if query_string %}{{ query_string }}&{% endif %}page={{ page_obj.next_page_number }}">Siguiente</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
 </div>
 {% endblock %}
